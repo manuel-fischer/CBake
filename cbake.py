@@ -39,7 +39,9 @@ def dbg(locals_dict):
         print(f"{k+':':20} {v}")
 
 
-
+def str_list(str_or_list) -> str:
+    if type(str_or_list) == str: return str_or_list
+    else: return " ".join(str_or_list)
 
 
 def read_dep_file():
@@ -203,17 +205,17 @@ def discover(file_times, file_includes, sources):
 def compile_object_file(fn, settings):
     fnn, ext = os.path.splitext(fn)
     if ext == ".c":
-        flags = settings.get("c-flags", "")
+        flags = str_list(settings.get("c-flags", ""))
         comp  = CC
     else:
-        flags = settings.get("cxx-flags", "")
+        flags = str_list(settings.get("cxx-flags", ""))
         comp  = CXX
         
     ofn = f"obj/{fnn}.o"
     
     os.makedirs(os.path.split(ofn)[0], exist_ok=True)
     
-    cmd = f"{comp} -c -o {ofn} {flags} -Iinclude/ src/{fn}"
+    cmd = f"{comp} -c -o {ofn} -Iinclude/ src/{fn} {flags}"
 
     print(cmd)
     # TODO if compilation fails, remove it from the file_times, to invalidate
@@ -228,17 +230,16 @@ def compile_executable(sources, settings):
         if ext == ".cpp": has_cxx = True
         object_files.append(f"obj/{fnn}.o")
         
-    flags = settings.get("flags", "")
+    flags = str_list(settings.get("linker-flags", ""))
 
     if has_cxx: comp = CXX
     else:       comp = CC
 
     ofn = settings.get("program", "a.out")
-    cmd = f"{comp} -o {ofn} {flags} {' '.join(object_files)}"
+    cmd = f"{comp} -o {ofn} {' '.join(object_files)} {flags}"
 
     print(cmd)
     if os.system(cmd): exit(1)
-
 
 
 def load_settings():
