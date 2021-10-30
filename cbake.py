@@ -272,6 +272,8 @@ def process_files(settings):
 
     if recompile:
         compile_executable(sources, settings)
+    else:
+        print("CBake: Nothing needs to be done")
 
     # 3. update dependency
     if n_file_times != file_times or n_file_includes != file_includes:
