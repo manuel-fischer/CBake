@@ -42,6 +42,12 @@ CXX = "g++"
 FILE_NOT_FOUND = object()
 FILE_AMBIGUOUS = object()
 
+# used by `@!WIN: -cmd` syntax
+flags = {
+    "WIN": os.name == 'nt'
+}
+
+
 # filename -> effective_path | FILE_NOT_FOUND | FILE_AMBIGUOUS
 # None if the file is cannot be found
 path_cache = {}
@@ -87,9 +93,26 @@ def dbg(locals_dict):
         eprint(f"{k+':':20} {v}")
 
 
+def conditional_element(s: str) -> str:
+    if s.startswith('@'):
+        s = s[1:]
+        negated = s.startswith('!')
+        if negated: s = s[1:]
+
+        flag_end = s.find(':')
+        flag = s[:flag_end]
+        
+        if flag in flags and flags[flag]:
+            return s[flag_end+1:]
+        else:
+            return ""
+    else:
+        return s
+    
+
 def str_list(str_or_list) -> str:
     if type(str_or_list) == str: return str_or_list
-    else: return " ".join(str_or_list)
+    else: return " ".join(map(conditional_element, str_or_list))
 
 
 def read_dep_file():
@@ -362,7 +385,7 @@ def load_settings():
 def program_filename(name):
     n, ext = os.path.splitext(name)
     if ext == ".exe": return name
-    if os.name == 'nt': # Windows
+    if flags["WIN"]: # Windows
         return name + ".exe"
     return name
 
