@@ -2,3 +2,4 @@
 *.o
 *.exe
 .cbake-dependencies.txt
+.cbake-dependencies-dbg.txt
