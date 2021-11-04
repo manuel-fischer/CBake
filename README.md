@@ -50,7 +50,7 @@ is if the current platform is a windows platform.
 
 `DEBUG`: CBake has been called with the `debug` option
 
-`<NUMBER>` (`32`, `64`): The architecture/adress width
+`<NUMBER>` (`32`, `64`): The architecture/address width
 
 
 # CBake
