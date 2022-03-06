@@ -1,6 +1,9 @@
 # CBake
 Simple C/C++ building tool, with include-dependency checking
 
+# `Add CBake to a repository`
+
+`git submodule add -- https://github.com/manuel-fischer/CBake`
 
 # `bakefile.json`
 
