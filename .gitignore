@@ -3,3 +3,5 @@
 *.exe
 .cbake-dependencies.txt
 .cbake-dependencies-dbg.txt
+
+__pycache__

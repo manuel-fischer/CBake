@@ -3,7 +3,18 @@ Simple C/C++ building tool, with include-dependency checking
 
 # `Add CBake to a repository`
 
-`git submodule add -- https://github.com/manuel-fischer/CBake`
+To add CBake to your repository, add CBake as a submodule:
+
+```
+git submodule add -- https://github.com/manuel-fischer/CBake CBake
+```
+
+To create a shortcut command and a basic bakefile, if it did not already exist in the current directory:
+
+```
+python CBake/cbake-setup.py
+```
+
 
 # `bakefile.json`
 
@@ -25,8 +36,8 @@ a conditional element, that is only included if the condition between the `@` an
 evaluates to true. The condition is composed of multiple literals connected by `&`.
 Each literal can start with an `!`, this means that the value of flag gets inverted.
 
-The `-luser32` parameter is only passed to the compiler, if the WIN-Flag is active, that
-is if the current platform is a windows platform.
+For example, the `-luser32` parameter is only passed to the compiler, if the WIN-Flag is active, that
+is if the current platform is a windows platform:
 
 ```json
 "@WIN: -luser32"

@@ -1,19 +1,17 @@
+#!/usr/bin/python
 import os
 import sys
 import struct
+from sys import stderr
 
 # TODO relative inclusion of header files in include/ from src/ not supported by vscode
 
-try:
-    import commentjson as json
-except:
-    import json
+import json
 from dataclasses import dataclass
+from typing import Dict, List, Set
 
 CBAKE_DEP_FILE = ".cbake-dependencies.txt"
 CBAKE_DEP_FILE_DBG = ".cbake-dependencies-dbg.txt"
-
-cbake_dep_file = CBAKE_DEP_FILE
 
 def pjoin(*paths):
 
@@ -46,22 +44,35 @@ CXX = "g++"
 FILE_NOT_FOUND = object()
 FILE_AMBIGUOUS = object()
 
-# used by the special syntax:
-#  `@!WIN&64: -opt`, this enables `-opt` only if the current platform
-#  is not Windows and the current platform is a 64 bit system
-flags = {
-    "WIN": os.name == 'nt',
-    str(struct.calcsize("P") * 8): True # Pointer bit width: 32 for 32-bit; 64 for 64-bit eg x64
-}
+
+def system_flags():
+    return {
+        "WIN": os.name == 'nt',
+        str(struct.calcsize("P") * 8): True # Pointer bit width: 32 for 32-bit; 64 for 64-bit eg x64
+    }
+
+class CBakeCtx:
+    cbake_dep_file : str
+    flags : Dict[str, bool]
+    out_prefix : str
+    path_cache : Dict[str, str]
+
+    def __init__(self):
+        self.cbake_dep_file = CBAKE_DEP_FILE
+
+        # used by the special syntax:
+        #  `@!WIN&64: -opt`, this enables `-opt` only if the current platform
+        #  is not Windows and the current platform is a 64 bit system
+        self.flags = system_flags()
+
+        # prefix to all output files
+        self.out_prefix = ""
+
+        # filename -> effective_path | FILE_NOT_FOUND | FILE_AMBIGUOUS
+        # None if the file is cannot be found
+        self.path_cache = {}
 
 
-# prefix to all output files
-out_prefix = ""
-
-
-# filename -> effective_path | FILE_NOT_FOUND | FILE_AMBIGUOUS
-# None if the file is cannot be found
-path_cache = {}
 
 # Files could be moved between src/ and include/!
 # this needs to be handled correctly
@@ -85,16 +96,16 @@ def get_effective_path_(path):
 
     return FILE_NOT_FOUND
 
-def get_effective_path_s(path):
-    try:    return path_cache[path]
+def get_effective_path_s(ctx : CBakeCtx, path):
+    try:    return ctx.path_cache[path]
     except: pass
     
     epath = get_effective_path_(path)
-    path_cache[path] = epath
+    ctx.path_cache[path] = epath
     return epath
     
-def get_effective_path(path):
-    epath = get_effective_path_s(path)
+def get_effective_path(ctx : CBakeCtx, path):
+    epath = get_effective_path_s(ctx, path)
     if epath == FILE_NOT_FOUND: raise FileNotFoundError
     if epath == FILE_AMBIGUOUS: raise Exception("Ambiguous Filename")
     return epath
@@ -104,7 +115,7 @@ def dbg(locals_dict):
         eprint(f"{k+':':20} {v}")
 
 
-def conditional_element(s: str) -> str:
+def conditional_element(ctx : CBakeCtx, s: str) -> str:
     if s.startswith('@'):
         s = s[1:]
 
@@ -116,7 +127,7 @@ def conditional_element(s: str) -> str:
             negated = flag.startswith('!')
             if negated: flag = flag[1:].strip()
 
-            result = flag in flags and flags[flag]
+            result = flag in ctx.flags and ctx.flags[flag]
             if negated: result = not result
             if not result:
                 return ""
@@ -126,16 +137,16 @@ def conditional_element(s: str) -> str:
         return s
     
 
-def str_list(str_or_list) -> str:
+def collect_args(ctx : CBakeCtx, str_or_list) -> str:
     if type(str_or_list) == str: return str_or_list
-    else: return " ".join(map(conditional_element, str_or_list))
+    else: return " ".join(map(lambda s: conditional_element(ctx, s), str_or_list))
 
 
-def read_dep_file():
+def read_dep_file(ctx : CBakeCtx):
     file_times = {}
     file_includes = {}
     try:
-        with open(cbake_dep_file) as f:
+        with open(ctx.cbake_dep_file) as f:
             for l in f.readlines():
                 l = l.strip()
 
@@ -155,10 +166,10 @@ def read_dep_file():
     return file_times, file_includes
 
 
-def write_dep_file(file_times, file_includes):
+def write_dep_file(ctx : CBakeCtx, file_times, file_includes):
     
     files = sorted(file_times.keys())
-    with open(cbake_dep_file, "w") as f:
+    with open(ctx.cbake_dep_file, "w") as f:
         for fn in files:
             s_time = str(file_times[fn])
             s_includes = " ".join(f"{fname}@{ln}" for fname, ln in file_includes[fn])
@@ -212,11 +223,11 @@ def get_includes(filename, efilename):
             yield fname, ln+1
 
 
-def check_includes(filename, efilename, includes):
+def check_includes(ctx, filename, efilename, includes):
     contents = None
     success = True
     for fname, ln in includes:
-        efn = get_effective_path_s(fname)
+        efn = get_effective_path_s(ctx, fname)
         if msg := get_err_msg(efn):
             if contents is None:
                 with open(efilename) as f:
@@ -258,7 +269,7 @@ def collect_sources():
             assert f[0:4] == "src" + os.sep
             yield f[4:]
 
-def discover(file_times, file_includes, sources):
+def discover(ctx : CBakeCtx, file_times, file_includes, sources):
     success = True
 
 
@@ -282,7 +293,7 @@ def discover(file_times, file_includes, sources):
         checked_files |= cur_files
 
         for fn in cur_files:
-            efn = get_effective_path_s(fn)
+            efn = get_effective_path_s(ctx, fn)
             assert get_err_msg(efn) == None
 
             f_time = os.path.getmtime(efn)
@@ -297,7 +308,7 @@ def discover(file_times, file_includes, sources):
             else:
                 includes = file_includes[fn]
 
-            if not check_includes(fn, efn, includes):
+            if not check_includes(ctx, fn, efn, includes):
                 success = False
 
             else:
@@ -351,16 +362,16 @@ def discover(file_times, file_includes, sources):
     return new_file_times, new_file_includes, recompile, success
 
 
-def compile_object_file(fn, settings):
+def compile_object_file(ctx : CBakeCtx, fn):
     fnn, ext = os.path.splitext(fn)
     if ext == ".c":
-        flags = str_list(settings.get("c-flags", ""))
+        comp_flags = collect_args(ctx, ctx.settings.get("c-flags", ""))
         comp  = CC
     else:
-        flags = str_list(settings.get("cxx-flags", ""))
+        comp_flags = collect_args(ctx, ctx.settings.get("cxx-flags", ""))
         comp  = CXX
         
-    ofn = f"obj/{out_prefix + fnn}.o"
+    ofn = f"obj/{ctx.out_prefix + fnn}.o"
     
     os.makedirs(os.path.split(ofn)[0], exist_ok=True)
 
@@ -369,28 +380,28 @@ def compile_object_file(fn, settings):
     include_path     = "-Iinclude"
     include_paths = include_path if include_path_rel == include_path else include_path_rel + " " + include_path
     
-    cmd = f"{comp} -c -o {ofn} {include_paths} src/{fn} {flags}"
+    cmd = f"{comp} -c -o {ofn} {include_paths} src/{fn} {comp_flags}"
 
     eprint(cmd)
     success = os.system(cmd) == 0
     return success
 
-def compile_executable(sources, settings):
+def compile_executable(ctx : CBakeCtx, sources):
 
     has_cxx = False
     object_files = []
     for fn in sources:
         fnn, ext = os.path.splitext(fn)
         if ext == ".cpp": has_cxx = True
-        object_files.append(f"obj/{out_prefix + fnn}.o")
+        object_files.append(f"obj/{ctx.out_prefix + fnn}.o")
         
-    flags = str_list(settings.get("linker-flags", ""))
+    comp_flags = collect_args(ctx, ctx.settings.get("linker-flags", ""))
 
     if has_cxx: comp = CXX
     else:       comp = CC
 
-    ofn = settings.get("program", "a.out")
-    cmd = f"{comp} -o {out_prefix + ofn} {' '.join(object_files)} {flags}"
+    ofn = ctx.settings.get("program", "a.out")
+    cmd = f"{comp} -o {ctx.out_prefix + ofn} {' '.join(object_files)} {comp_flags}"
 
     eprint(cmd)
     success = os.system(cmd) == 0
@@ -402,15 +413,15 @@ def load_settings():
         return json.loads(f.read())
 
 
-def program_filename(name):
+def program_filename(ctx : CBakeCtx, name):
     n, ext = os.path.splitext(name)
     if ext == ".exe": return name
-    if flags["WIN"]: # Windows
+    if ctx.flags["WIN"]: # Windows
         return name + ".exe"
     return name
 
 
-def process_files(settings):
+def process_files(ctx : CBakeCtx):
     # 1. discover
     # 2. compile
     # 3. update dependency file
@@ -418,9 +429,9 @@ def process_files(settings):
     # 1. discover
     eprint("CBake: File discovery...")
     sources = list(collect_sources())
-    file_times, file_includes = read_dep_file()
+    file_times, file_includes = read_dep_file(ctx)
     n_file_times, n_file_includes, recompile, success = \
-                  discover(file_times, file_includes, sources)
+                  discover(ctx, file_times, file_includes, sources)
 
     if not success:
         eprint("CBake: File discovery failed")
@@ -429,7 +440,7 @@ def process_files(settings):
     # 2. compile
     eprint("CBake: Object file compilation...")
     for fn in recompile:
-        if not compile_object_file(fn, settings):
+        if not compile_object_file(ctx, fn):
             success = False
             # remove it from the list to invalidate
             del n_file_times[fn]
@@ -438,7 +449,7 @@ def process_files(settings):
 
     if success and recompile:
         eprint("CBake: Executable linking...")
-        success = compile_executable(sources, settings)
+        success = compile_executable(ctx, sources)
     elif success:
             eprint("CBake: Nothing needs to be done")
             
@@ -447,18 +458,9 @@ def process_files(settings):
 
     # 3. update dependency
     if n_file_times != file_times or n_file_includes != file_includes:
-        write_dep_file(n_file_times, n_file_includes)
+        write_dep_file(ctx, n_file_times, n_file_includes)
 
     return success
-
-
-def cbake(root):
-    prev_cwd = os.getcwd()
-    os.chdir(root)
-    try:
-        process_files()
-    finally:
-        os.chdir(prev_cwd)
 
 
 def remove(filename):
@@ -466,67 +468,99 @@ def remove(filename):
         except FileNotFoundError: pass
 
 
-if __name__ == "__main__":
-    from sys import argv, stderr
-    settings = load_settings()
+def print_help():
+    print("cbake.py help | [clean build] [debug] [test] | [clean]")
+    print("         (1)  |              (2)             |   (3)")
+    print()
+    print("The order of the arguments can be altered")
+    print()
+    print("   help         Shows this help")
+    print("   clean/clear  Delete the executable and the dependency cache")
+    print("   debug        Enables the debugging target")
+    print("                The program filename is prefixed with 'dbg-'")
+    print("                It sets the DEBUG flag to true")
+    print("   build        Build, default, only required when used")
+    print("                in combination with clean/clear")
+    print("   test         Run the program after compilation")
 
+
+@dataclass
+class CmdFlags:
+    debug : bool
+    clean : bool
+    build : bool
+    test : bool
+
+def parse_cmd_args(argv : List[str]) -> CmdFlags:
     if "help" in argv:
-        print("cbake.py help | [clean build] [debug] [test] | [clean]")
-        print("         (1)  |              (2)             |   (3)")
-        print()
-        print("The order of the arguments can be altered")
-        print()
-        print("   help         Shows this help")
-        print("   clean/clear  Delete the executable and the dependency cache")
-        print("   debug        Enables the debugging target")
-        print("                The program filename is prefixed with 'dbg-'")
-        print("                It sets the DEBUG flag to true")
-        print("   build        Build, default, only required when used")
-        print("                in combination with clean/clear")
-        print("   test         Run the program after compilation")
-        exit(2)
+        print_help()
+        return None
     
     cmd_flags = argv[1:]
     def pop_cmd_flag(name):
-        global cmd_flags
+        nonlocal cmd_flags
         if name in cmd_flags:
             cmd_flags.remove(name)
             return True
         return False
-    f_debug = pop_cmd_flag("debug")
-    f_clean = pop_cmd_flag("clean") or pop_cmd_flag("clear")
-    f_build = pop_cmd_flag("build")
-    f_test  = pop_cmd_flag("test")
+
+    fs = CmdFlags(
+        debug = pop_cmd_flag("debug"),
+        clean = pop_cmd_flag("clean") or pop_cmd_flag("clear"),
+        build = pop_cmd_flag("build"),
+        test  = pop_cmd_flag("test"),
+    )
 
     if cmd_flags:
         print(f"CBake: Warning: Ignored arguments:", file = stderr)
-        print(f"    {' '.join(flags)}", file = stderr)
+        print(f"    {' '.join(cmd_flags)}", file = stderr)
+
+    return fs
 
 
-    if f_clean and not f_build:
-        if f_debug or f_build or f_test:
+def main(argv):
+    from sys import argv, stderr
+
+    fs = parse_cmd_args(argv)
+    if not fs:
+        return 2
+
+
+    ctx = CBakeCtx()
+    ctx.settings = load_settings()
+    
+
+    if fs.clean and not fs.build:
+        if fs.debug or fs.build or fs.test:
             print("CBake: use build in combination with clean", file = stderr)
 
 
-    if f_debug:
-        flags["DEBUG"] = True
+    if fs.debug:
+        ctx.flags["DEBUG"] = True
 
-        out_prefix = "dbg-"
-        cbake_dep_file = CBAKE_DEP_FILE_DBG
+        ctx.out_prefix = "dbg-"
+        ctx.cbake_dep_file = CBAKE_DEP_FILE_DBG
 
-    program = settings.get("program", "a.out")
+    program = ctx.settings.get("program", "a.out")
     
-    if f_clean:
-        remove(program_filename(program))
-        remove(program_filename("dbg-" + program))
+    if fs.clean:
+        remove(program_filename(ctx, program))
+        remove(program_filename(ctx, "dbg-" + program))
         # TODO delete object files
         remove(CBAKE_DEP_FILE)
         remove(CBAKE_DEP_FILE_DBG)
 
-    if not f_clean or f_build:
-        success = process_files(settings)
-        if f_test and success: success = os.system(out_prefix + program) == 0
-        exit(0 if success else 1)
+    if not fs.clean or fs.build:
+        success = process_files(ctx)
+        if fs.test and success: success = os.system(ctx.out_prefix + program) == 0
+        return (0 if success else 1)
         
+
+    return 0
+
+    
+if __name__ == "__main__":
+    from sys import argv
+    exit(main(argv))
         
     
