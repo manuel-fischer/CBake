@@ -18,7 +18,7 @@ BAKEFILE = """{{
 		"@!DEBUG: -DNDEBUG",
 		"@DEBUG: -O2",
 		"@DEBUG: -g",
-		"-Wall",
+		"-Wall"
 	],
 	"cxx-flags": [
 		"-std=c++20",
@@ -26,7 +26,7 @@ BAKEFILE = """{{
 		"@!DEBUG: -DNDEBUG",
 		"@DEBUG: -O2",
 		"@DEBUG: -g",
-		"-Wall",
+		"-Wall"
 	],
 	"linker-flags": []
 }}
