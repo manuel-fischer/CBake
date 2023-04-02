@@ -4,11 +4,14 @@ import sys
 import struct
 from sys import stderr
 
+from multiprocessing.pool import ThreadPool
+from threading import Lock
+
 # TODO relative inclusion of header files in include/ from src/ not supported by vscode
 
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Callable, Dict, List
 
 CBAKE_DEP_FILE = ".cbake-dependencies.txt"
 CBAKE_DEP_FILE_DBG = ".cbake-dependencies-dbg.txt"
@@ -37,6 +40,22 @@ def pjoin(*paths):
 def eprint(*args, end='\n', file=sys.stderr):
     print(*args, end=end, file=file)
 
+class LazyPrinter:
+    content : str
+    print : Callable
+
+    def __init__(self, print=eprint):
+        self.content = ""
+        self.print = print
+
+    def __call__(self, *args, sep=None, end='\n'):
+        if sep is None: sep = ' '
+        self.content += sep.join(args) + end
+
+    def print_all(self):
+        self.print(self.content, end="")
+
+
 CC = "gcc"
 CXX = "g++"
 
@@ -57,6 +76,9 @@ class CBakeCtx:
     out_prefix : str
     path_cache : Dict[str, str]
 
+    # set separately, json object
+    settings : object
+
     def __init__(self):
         self.cbake_dep_file = CBAKE_DEP_FILE
 
@@ -72,6 +94,36 @@ class CBakeCtx:
         # None if the file is cannot be found
         self.path_cache = {}
 
+class ParallelWorkerCtx:
+    _thread_pool : ThreadPool
+    _stop : bool
+    _lock : Lock
+
+    def __init__(self, thread_count):
+        self._thread_pool = ThreadPool(thread_count)
+        self._stop = False
+        self._lock = Lock()
+
+    def raise_stop(self):
+        with self._lock:
+            # Finish pending tasks, the following would cancel them:
+            #if not self._stop:
+            #    self._thread_pool.terminate()
+            self._stop = True
+
+    def is_stop_raised(self):
+        with self._lock:
+            return self._stop
+
+    def execute(self, func, tasks):
+        def yield_func():
+            for t in tasks:
+                if self.is_stop_raised(): return
+                yield t
+
+        return self._thread_pool.imap_unordered(func, yield_func())
+
+
 
 
 # Files could be moved between src/ and include/!
@@ -81,10 +133,10 @@ class CBakeCtx:
 # directories are not allowed
 def get_effective_path_(path):
     global has_invalid_includes
-    
+
     src_path = pjoin("src", path)
     inc_path = pjoin("include", path)
-    
+
     in_src     = os.path.exists(src_path)
     in_include = os.path.exists(inc_path)
 
@@ -99,11 +151,11 @@ def get_effective_path_(path):
 def get_effective_path_s(ctx : CBakeCtx, path):
     try:    return ctx.path_cache[path]
     except: pass
-    
+
     epath = get_effective_path_(path)
     ctx.path_cache[path] = epath
     return epath
-    
+
 def get_effective_path(ctx : CBakeCtx, path):
     epath = get_effective_path_s(ctx, path)
     if epath == FILE_NOT_FOUND: raise FileNotFoundError
@@ -131,11 +183,11 @@ def conditional_element(ctx : CBakeCtx, s: str) -> str:
             if negated: result = not result
             if not result:
                 return ""
-        
+
         return s[flag_end+1:]
     else:
         return s
-    
+
 
 def collect_args(ctx : CBakeCtx, str_or_list) -> str:
     if type(str_or_list) == str: return str_or_list
@@ -151,7 +203,7 @@ def read_dep_file(ctx : CBakeCtx):
                 l = l.strip()
 
                 if not l: continue
-                
+
                 fn, time, *includes = map(str.strip, l.split())
                 time = float(time)
                 file_times[fn] = time
@@ -167,21 +219,21 @@ def read_dep_file(ctx : CBakeCtx):
 
 
 def write_dep_file(ctx : CBakeCtx, file_times, file_includes):
-    
+
     files = sorted(file_times.keys())
     with open(ctx.cbake_dep_file, "w") as f:
         for fn in files:
             s_time = str(file_times[fn])
             s_includes = " ".join(f"{fname}@{ln}" for fname, ln in file_includes[fn])
             print(f"{fn} {s_time} {s_includes}", file = f)
-    
+
 
 def get_err_msg(efn):
     if efn == FILE_NOT_FOUND:
         return "No such file or directory"
     if efn == FILE_AMBIGUOUS:
         return "Ambiguous file include"
-            
+
 
 def get_includes(filename, efilename):
     with open(efilename) as f:
@@ -209,7 +261,7 @@ def get_includes(filename, efilename):
 
             if fname.startswith("."):
                 fname = os.path.split(filename)[0] + "/" + fname
-            
+
             #fnd = rl.find(rfname)
             #if msg := get_err_msg(efn):
             #    herefile = efilename # pjoin(os.getcwd(), efilename)
@@ -219,7 +271,7 @@ def get_includes(filename, efilename):
             #        " "*(fnd+1-1) + "^" + "~"*(2-1+len(rfname)),
             #        end = "\n\n"
             #    )
-                
+
             yield fname, ln+1
 
 
@@ -239,7 +291,7 @@ def check_includes(ctx, filename, efilename, includes):
             a = l.find('"')
             b = l.find('"', a+1)
             rfname = l[a+1:b]
-            
+
             herefile = efilename # pjoin(os.getcwd(), efilename)
             eprint(
                 f"{herefile}:{ln}:{a+1-1}: fatal error: {rfname}: {msg}\n" +
@@ -249,7 +301,7 @@ def check_includes(ctx, filename, efilename, includes):
             )
 
     return success
-            
+
 
 def get_included_files(includes):
     return set(fname for fname, location in includes)
@@ -276,11 +328,11 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
     # rebuilding: automatically removing unreferenced files
     new_file_times = {}
     new_file_includes = {}
-        
 
-    
+
+
     known_files = set(file_times.keys())
-    
+
     src_files = set(sources)
     cur_files = set(src_files) # copy
     checked_files = set()
@@ -297,7 +349,7 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
             assert get_err_msg(efn) == None
 
             f_time = os.path.getmtime(efn)
-            
+
             if fn not in known_files or \
                f_time > file_times[fn]:
 
@@ -333,7 +385,7 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
             if ff in included_from:
                 included_from[ff] |= {fn}
             else:
-                included_from[ff] = {fn}            
+                included_from[ff] = {fn}
 
 
     # backward pass: propagate modifications
@@ -341,11 +393,11 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
 
     cur_files = modified_files
     propagated_files = set()
-    
+
     while cur_files:
         next_files = set()
         propagated_files |= cur_files
-        
+
         for fn in cur_files:
             if fn in src_files:
                 recompile |= {fn}
@@ -362,7 +414,76 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
     return new_file_times, new_file_includes, recompile, success
 
 
-def compile_object_file(ctx : CBakeCtx, fn):
+
+
+# behaves like os.system, but improves output messages for vscode
+def exec_compiler(tprint, cmd):
+    #cmd = " ".join(cmd)
+    #return os.system(cmd)
+
+    def esc(cmds):
+        return f"\x1b[{cmds}"
+
+    from subprocess import Popen, PIPE
+    import re
+
+    proc = Popen(cmd, stderr=PIPE)
+
+    def colorize(l):
+        l = l.replace("error:", esc('91m')+"error:"+esc('0m'))
+        l = l.replace("warning:", esc('95m')+"warning:"+esc('0m'))
+        l = l.replace("note:", esc('96m')+"note:"+esc('0m'))
+        return l
+
+    regexpr_msg  = re.compile("^(.*):(\\d+):(\\d+):\\s+(error|warning):\\s+(.*)$")
+    regexpr_note = re.compile("^(.*):(\\d+):(\\d+):\\s+(note):\\s+(.*)$")
+    re_file = 1
+    re_line = 2
+    re_colm = 3
+    re_sevr = 4
+    re_what = 5
+
+    cur_file = None
+    cur_line = None
+    cur_colm = None
+    cur_sevr = None
+    cur_what = None
+
+    def print_prev():
+        if cur_file is None: return
+        tprint(colorize(f"SUM: {cur_file}:{cur_line}:{cur_colm}: {cur_sevr}: {cur_what}"))
+        tprint()
+        tprint()
+
+    while True:
+        l = proc.stderr.readline().decode()
+        if l == "":
+            returncode = proc.poll()
+            if returncode is not None:
+                print_prev()
+                return returncode
+        else:
+            if (m := re.match(regexpr_msg, l)) is not None:
+                print_prev()
+                cur_file = m.group(re_file)
+                cur_line = m.group(re_line)
+                cur_colm = m.group(re_colm)
+                cur_sevr = m.group(re_sevr)
+                cur_what = m.group(re_what)
+
+            if (m := re.match(regexpr_note, l)) is not None:
+                if "in expansion" in m.group(re_what):
+                    cur_file = m.group(re_file)
+                    cur_line = m.group(re_line)
+                    cur_colm = m.group(re_colm)
+                    # keep cur_sevr and cur_what
+
+            tprint(colorize(l), end="")
+
+
+
+
+def compile_object_file(tprint, ctx : CBakeCtx, fn):
     fnn, ext = os.path.splitext(fn)
     if ext == ".c":
         comp_flags = collect_args(ctx, ctx.settings.get("c-flags", ""))
@@ -370,41 +491,47 @@ def compile_object_file(ctx : CBakeCtx, fn):
     else:
         comp_flags = collect_args(ctx, ctx.settings.get("cxx-flags", ""))
         comp  = CXX
-        
+
     ofn = f"obj/{ctx.out_prefix + fnn}.o"
-    
+
+    # OK to be multithreaded, syscalls are synchronized
     os.makedirs(os.path.split(ofn)[0], exist_ok=True)
 
     # add include path relative to the include directory with the same name
     include_path_rel = "-I" + pjoin("include", os.path.split(fn)[0])
     include_path     = "-Iinclude"
-    include_paths = include_path if include_path_rel == include_path else include_path_rel + " " + include_path
-    
-    cmd = f"{comp} -c -o {ofn} {include_paths} src/{fn} {comp_flags}"
+    include_paths = [include_path] if include_path_rel == include_path else [include_path_rel, include_path]
 
-    eprint(cmd)
-    success = os.system(cmd) == 0
+    # TODO remove split:
+    comp_flags = comp_flags.split()
+
+    cmd = [comp, '-c', '-o', ofn, *include_paths, f'src/{fn}', *comp_flags]
+
+    tprint(' '.join(cmd))
+    success = exec_compiler(tprint, cmd) == 0
     return success
 
-def compile_executable(ctx : CBakeCtx, sources):
-
+def link_executable(tprint, ctx : CBakeCtx, sources):
     has_cxx = False
     object_files = []
     for fn in sources:
         fnn, ext = os.path.splitext(fn)
         if ext == ".cpp": has_cxx = True
         object_files.append(f"obj/{ctx.out_prefix + fnn}.o")
-        
+
     comp_flags = collect_args(ctx, ctx.settings.get("linker-flags", ""))
 
     if has_cxx: comp = CXX
     else:       comp = CC
 
     ofn = ctx.settings.get("program", "a.out")
-    cmd = f"{comp} -o {ctx.out_prefix + ofn} {' '.join(object_files)} {comp_flags}"
 
-    eprint(cmd)
-    success = os.system(cmd) == 0
+    # TODO remove split:
+    comp_flags = comp_flags.split()
+    cmd = [comp, '-o', ctx.out_prefix + ofn, *object_files, *comp_flags]
+
+    tprint(' '.join(cmd))
+    success = exec_compiler(tprint, cmd) == 0
     return success
 
 
@@ -425,7 +552,7 @@ def process_files(ctx : CBakeCtx):
     # 1. discover
     # 2. compile
     # 3. update dependency file
-    
+
     # 1. discover
     eprint("CBake: File discovery...")
     sources = list(collect_sources())
@@ -436,23 +563,50 @@ def process_files(ctx : CBakeCtx):
     if not success:
         eprint("CBake: File discovery failed")
         return False
-    
+
     # 2. compile
     eprint("CBake: Object file compilation...")
-    for fn in recompile:
-        if not compile_object_file(ctx, fn):
-            success = False
-            # remove it from the list to invalidate
-            del n_file_times[fn]
-            del n_file_includes[fn]
+    recompiled = set()
+    threads = ctx.settings.get("threads", os.cpu_count() or 1)
+    assert type(threads) == int
+    assert threads >= 1
+    if threads == 1: # single thread build
+        for fn in recompile:
+            if not compile_object_file(eprint, ctx, fn):
+                success = False
+                break
+
+            recompiled.add(fn)
+    else:
+        pctx = ParallelWorkerCtx(threads)
+
+        def handle_task(fn):
+            tprint = LazyPrinter()
+            task_success = compile_object_file(tprint, ctx, fn)
+            return (fn, tprint, task_success)
+
+        for (fn, tprint, task_success) in pctx.execute(handle_task, recompile):
+            tprint.print_all()
+            if not task_success:
+                pctx.raise_stop()
+                continue # still handle other outputs
+
+            recompiled.add(fn)
+
+
+    # remove not compiled files from the list to invalidate
+    not_compiled = recompile - recompiled
+    for fn in not_compiled:
+        del n_file_times[fn]
+        del n_file_includes[fn]
 
 
     if success and recompile:
         eprint("CBake: Executable linking...")
-        success = compile_executable(ctx, sources)
+        success = link_executable(eprint, ctx, sources)
     elif success:
             eprint("CBake: Nothing needs to be done")
-            
+
     if not success:
         eprint("CBake: Compilation failed")
 
@@ -495,7 +649,7 @@ def parse_cmd_args(argv : List[str]) -> CmdFlags:
     if "help" in argv:
         print_help()
         return None
-    
+
     cmd_flags = argv[1:]
     def pop_cmd_flag(name):
         nonlocal cmd_flags
@@ -528,7 +682,7 @@ def main(argv):
 
     ctx = CBakeCtx()
     ctx.settings = load_settings()
-    
+
 
     if fs.clean and not fs.build:
         if fs.debug or fs.build or fs.test:
@@ -542,7 +696,7 @@ def main(argv):
         ctx.cbake_dep_file = CBAKE_DEP_FILE_DBG
 
     program = ctx.settings.get("program", "a.out")
-    
+
     if fs.clean:
         remove(program_filename(ctx, program))
         remove(program_filename(ctx, "dbg-" + program))
@@ -554,13 +708,13 @@ def main(argv):
         success = process_files(ctx)
         if fs.test and success: success = os.system(ctx.out_prefix + program) == 0
         return (0 if success else 1)
-        
+
 
     return 0
 
-    
+
 if __name__ == "__main__":
     from sys import argv
     exit(main(argv))
-        
-    
+
+
