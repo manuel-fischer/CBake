@@ -1,4 +1,5 @@
 #!/usr/bin/python
+from functools import reduce
 import os
 import sys
 import struct
@@ -11,7 +12,8 @@ from threading import Lock
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, List
+import time
+from typing import Callable, Dict, List, Tuple
 
 CBAKE_DEP_FILE = ".cbake-dependencies.txt"
 CBAKE_DEP_FILE_DBG = ".cbake-dependencies-dbg.txt"
@@ -122,6 +124,50 @@ class ParallelWorkerCtx:
                 yield t
 
         return self._thread_pool.imap_unordered(func, yield_func())
+
+
+
+@dataclass
+class CompilationResult:
+    filename : str
+    exit_code : int
+    elapsed_time : float # seconds
+    warnings : int
+    errors : int
+
+    @property
+    def success(self):
+        return self.exit_code == 0
+
+
+def pretty_format_csv(attrs : List[Tuple[str,str,str,str]], l : List[object]):
+    attr_names = [attr_csv for attr, attr_csv, attr_fmt, align in attrs]
+    cells = [
+        [attr_fmt.format(getattr(row, attr)) for attr, attr_csv, attr_fmt, align in attrs]
+        for row in l
+    ]
+    all_cells = [attr_names] + cells
+
+    all_cell_len = ((len(cell) for cell in row) for row in all_cells)
+
+    hd_max = lambda a, b: map(lambda aibi: max(*aibi), zip(a, b))
+
+    widths = tuple(reduce(
+        hd_max,
+        all_cell_len,
+        (0,) * len(attrs)
+    ))
+
+
+    format_str = " ; ".join(
+        f"{{:{align}{w}}}"
+        for w, (attr, attr_csv, attr_fmt, align) in zip(widths, attrs)
+    )
+
+
+    return "\n".join(format_str.format(*row).rstrip() for row in all_cells)
+
+    
 
 
 
@@ -417,7 +463,7 @@ def discover(ctx : CBakeCtx, file_times, file_includes, sources):
 
 
 # behaves like os.system, but improves output messages for vscode
-def exec_compiler(tprint, cmd):
+def exec_compiler(tprint, cmd) -> Tuple[int, int, int]: # exit_code, errors, warnings
     #cmd = " ".join(cmd)
     #return os.system(cmd)
 
@@ -455,13 +501,14 @@ def exec_compiler(tprint, cmd):
         tprint()
         tprint()
 
+    errors = warnings = 0
     while True:
         l = proc.stderr.readline().decode()
         if l == "":
             returncode = proc.poll()
             if returncode is not None:
                 print_prev()
-                return returncode
+                return (returncode, errors, warnings)
         else:
             if (m := re.match(regexpr_msg, l)) is not None:
                 print_prev()
@@ -470,6 +517,9 @@ def exec_compiler(tprint, cmd):
                 cur_colm = m.group(re_colm)
                 cur_sevr = m.group(re_sevr)
                 cur_what = m.group(re_what)
+
+                if cur_sevr == "error": errors += 1
+                if cur_sevr == "warning": warnings += 1
 
             if (m := re.match(regexpr_note, l)) is not None:
                 if "in expansion" in m.group(re_what):
@@ -483,7 +533,7 @@ def exec_compiler(tprint, cmd):
 
 
 
-def compile_object_file(tprint, ctx : CBakeCtx, fn):
+def compile_object_file(tprint, ctx : CBakeCtx, fn) -> CompilationResult:
     fnn, ext = os.path.splitext(fn)
     if ext == ".c":
         comp_flags = collect_args(ctx, ctx.settings.get("c-flags", ""))
@@ -508,10 +558,19 @@ def compile_object_file(tprint, ctx : CBakeCtx, fn):
     cmd = [comp, '-c', '-o', ofn, *include_paths, f'src/{fn}', *comp_flags]
 
     tprint(' '.join(cmd))
-    success = exec_compiler(tprint, cmd) == 0
-    return success
+    start = time.time()
+    exit_code, errors, warnings = exec_compiler(tprint, cmd)
+    elapsed = time.time() - start
 
-def link_executable(tprint, ctx : CBakeCtx, sources):
+    return CompilationResult(
+        filename=ofn,
+        exit_code=exit_code,
+        errors=errors,
+        warnings=warnings,
+        elapsed_time=elapsed
+    )
+
+def link_executable(tprint, ctx : CBakeCtx, sources) -> CompilationResult:
     has_cxx = False
     object_files = []
     for fn in sources:
@@ -531,8 +590,18 @@ def link_executable(tprint, ctx : CBakeCtx, sources):
     cmd = [comp, '-o', ctx.out_prefix + ofn, *object_files, *comp_flags]
 
     tprint(' '.join(cmd))
-    success = exec_compiler(tprint, cmd) == 0
-    return success
+    start = time.time()
+    exit_code, errors, warnings = exec_compiler(tprint, cmd)
+    elapsed = time.time() - start
+
+    return CompilationResult(
+        filename=ofn,
+        exit_code=exit_code,
+        errors=errors,
+        warnings=warnings,
+        elapsed_time=elapsed
+    )
+
 
 
 def load_settings():
@@ -566,13 +635,17 @@ def process_files(ctx : CBakeCtx):
 
     # 2. compile
     eprint("CBake: Object file compilation...")
+    compilation_stats : List[CompilationResult] = []
+
     recompiled = set()
     threads = ctx.settings.get("threads", os.cpu_count() or 1)
     assert type(threads) == int
     assert threads >= 1
     if threads == 1: # single thread build
         for fn in recompile:
-            if not compile_object_file(eprint, ctx, fn):
+            result = compile_object_file(eprint, ctx, fn)
+            compilation_stats.append(result)
+            if not result.success:
                 success = False
                 break
 
@@ -582,12 +655,14 @@ def process_files(ctx : CBakeCtx):
 
         def handle_task(fn):
             tprint = LazyPrinter()
-            task_success = compile_object_file(tprint, ctx, fn)
-            return (fn, tprint, task_success)
+            result = compile_object_file(tprint, ctx, fn)
+            return (fn, tprint, result)
 
-        for (fn, tprint, task_success) in pctx.execute(handle_task, recompile):
+        for (fn, tprint, result) in pctx.execute(handle_task, recompile):
             tprint.print_all()
-            if not task_success:
+            compilation_stats.append(result)
+            if not result.success:
+                success = False
                 pctx.raise_stop()
                 continue # still handle other outputs
 
@@ -603,7 +678,9 @@ def process_files(ctx : CBakeCtx):
 
     if success and recompile:
         eprint("CBake: Executable linking...")
-        success = link_executable(eprint, ctx, sources)
+        result = link_executable(eprint, ctx, sources)
+        compilation_stats.append(result)
+        success = result.success
     elif success:
             eprint("CBake: Nothing needs to be done")
 
@@ -613,6 +690,21 @@ def process_files(ctx : CBakeCtx):
     # 3. update dependency
     if n_file_times != file_times or n_file_includes != file_includes:
         write_dep_file(ctx, n_file_times, n_file_includes)
+
+    # 4. write statistics
+    if (build_stats_file := ctx.settings.get("build-stats-file", None)) is not None:
+        with open(build_stats_file, "wt") as f:
+            compilation_stats.sort(key=lambda st: st.elapsed_time, reverse=True)
+            f.write(pretty_format_csv(
+                [
+                    ("filename",     "filename", "{}",     ""),
+                    ("exit_code",    "$?",       "{}",     ">"),
+                    ("errors",       "E",        "{}",     ">"),
+                    ("warnings",     "W",        "{}",     ">"),
+                    ("elapsed_time", "T",        "{:.3f}", ">")
+                ],
+                compilation_stats
+            ))
 
     return success
 

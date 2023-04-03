@@ -22,6 +22,11 @@ The `bakefile.json` contains all the necessary settings specific to the program.
 
 `program`: A string which refers to the filename of the executable.
 
+**Build Statistics:**
+
+`build-stats-file`: Specify filename (default `null`), to which
+build statistics are written in a readable CSV-format. If `null` is specified, no statistics are generated.
+
 **Compiler Arguments:**
 
 `c-flags`: Compiler settings that are used for compiling an object file from a C source.
