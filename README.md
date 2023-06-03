@@ -22,6 +22,8 @@ The `bakefile.json` contains all the necessary settings specific to the program.
 
 `program`: A string which refers to the filename of the executable.
 
+`exclude-source`: A glob pattern or a list of glob patterns of files to ignore for building.
+
 **Build Statistics:**
 
 `build-stats-file`: Specify filename (default `null`), to which

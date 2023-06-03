@@ -14,6 +14,7 @@ import json
 from dataclasses import dataclass
 import time
 from typing import Callable, Dict, List, Tuple
+from fnmatch import fnmatch
 
 CBAKE_DEP_FILE = ".cbake-dependencies.txt"
 CBAKE_DEP_FILE_DBG = ".cbake-dependencies-dbg.txt"
@@ -361,9 +362,15 @@ def collect_files(path):
         else:
             yield p
 
-def collect_sources():
+def fnmatchlist(filename, patterns):
+    if isinstance(patterns, str): return fnmatch(filename, patterns)
+    return any(fnmatch(filename, p) for p in patterns)
+
+def collect_sources(ctx):
+    pattern_exclude = ctx.settings.get("exclude-source", [])
     for f in collect_files("src"):
         if os.path.splitext(f)[1] in [".c", ".cpp"]:
+            if fnmatchlist(f, pattern_exclude): continue
             assert f[0:4] == "src" + os.sep
             yield f[4:]
 
@@ -624,7 +631,7 @@ def process_files(ctx : CBakeCtx):
 
     # 1. discover
     eprint("CBake: File discovery...")
-    sources = list(collect_sources())
+    sources = list(collect_sources(ctx))
     file_times, file_includes = read_dep_file(ctx)
     n_file_times, n_file_includes, recompile, success = \
                   discover(ctx, file_times, file_includes, sources)
